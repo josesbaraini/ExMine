@@ -1,0 +1,20 @@
+# deps
+node_modules/
+**/node_modules/
+
+# secrets — real .env is never committed; .env.example is the template
+.env
+
+# build output
+frontend/dist/
+*.tsbuildinfo
+
+# runtime data — never committed (local conversations, extractions, neo4j, logs)
+data/
+
+# private docs — never committed
+docs/
+
+# misc
+*.log
+.DS_Store

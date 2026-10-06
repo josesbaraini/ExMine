@@ -1,0 +1,75 @@
+# Jarvis Phase 3 — backend + Neo4j as compose services. `docker compose up`
+# brings up the whole stack in one command (§3): jarvis reaches Neo4j at
+# bolt://neo4j:7687 (service name as hostname, not localhost).
+services:
+  neo4j:
+    image: neo4j:5-community
+    # Run as the host user (not root) so the bind-mounted ./data/neo4j stays
+    # host-user-owned (§3/§10). The official image only chowns /data & /logs
+    # when running as root — running as the host user keeps ownership intact
+    # and verifies writability instead of fighting us.
+    user: "${USER_ID:-1000}:${GROUP_ID:-1000}"
+    environment:
+      # Same single source of truth the backend parses (see backend/src/index.ts);
+      # the neo4j image refuses passwords shorter than 8 chars at startup.
+      NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/jarvis-dev-password}
+    volumes:
+      # Bind mounts MUST exist on the host before the first `up` (§3) and be
+      # owned by the host user — scripts/smoke-test.sh pre-creates and checks
+      # them. :z relabels to the shared container_file_t:s0 label for SELinux
+      # (Fedora). Use :z, NOT :Z: :Z picks a private per-container MCS category
+      # (s0:cN,cN) that changes whenever the container is recreated, and Docker
+      # does not re-relabel a bind source already carrying a container label —
+      # the stale category then SELinux-denies all store writes ("Permission
+      # denied" / "Could not append transaction"). :z's flat s0 has no
+      # categories, so it survives any number of recreates. Harmless elsewhere.
+      - ./data/neo4j/data:/data:z
+      - ./data/neo4j/logs:/logs:z
+    ports:
+      - "7474:7474" # Neo4j Browser (http)
+      - "7687:7687" # Bolt
+    healthcheck:
+      # Proves Neo4j is actually queryable over Bolt (not merely that the
+      # process started): an authenticated cypher-shell round-trip using the
+      # same NEO4J_AUTH credentials the backend uses. Compose reports the
+      # container "healthy" only once this passes — and jarvis now waits for
+      # it (depends_on condition), so plain `docker compose up` no longer
+      # races Neo4j startup. $$ escapes $ for compose interpolation.
+      test:
+        [
+          "CMD-SHELL",
+          "user=$$(echo \"$$NEO4J_AUTH\" | cut -d/ -f1); pass=$$(echo \"$$NEO4J_AUTH\" | cut -d/ -f2-); cypher-shell -u \"$$user\" -p \"$$pass\" 'RETURN 1' || exit 1",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  jarvis:
+    build:
+      context: .
+      args:
+        # Match the host user so bind-mounted ./data stays host-owned.
+        USER_ID: ${USER_ID:-1000}
+        GROUP_ID: ${GROUP_ID:-1000}
+    image: jarvis-phase3:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      # :z relabels to the shared container_file_t:s0 label for SELinux
+      # (Fedora) so the container can write the bind mount without a denial.
+      # :z (not :Z): a :Z private per-container MCS category goes stale when
+      # the container is recreated (Docker won't re-relabel) and starts
+      # SELinux-denying every write. Harmless on hosts without SELinux.
+      - ./data:/app/data:z
+    env_file:
+      - .env
+    depends_on:
+      # service_healthy — NOT informational. jarvis only starts once Neo4j
+      # reports healthy (a real Bolt round-trip), so plain `docker compose up`
+      # gives you a working stack instead of a 502 race while Neo4j boots.
+      # The GraphClient's own retry stays as a backstop for slow restarts.
+      neo4j:
+        condition: service_healthy
+    restart: unless-stopped
